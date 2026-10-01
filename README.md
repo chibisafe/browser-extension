@@ -4,36 +4,7 @@
   <img height="300" src="https://chibisafe.moe/xjoghu.png">
 </p>
 
-Companion extension for the chibisafe service.
-
-Supports chibisafe v6 and the v7 API. Saving settings validates the instance URL,
-API key, account, and destination list before replacing the saved configuration.
-The settings page displays the detected version and uses albums for v6 or folders
-for v7.
-
-Detection checks `/api/version` for a v6 version string. If the route is missing
-(404/405, or a successful HTML frontend fallback), an authenticated
-`/api/v1/users/me` response confirms v7 API compatibility. Network failures,
-authentication failures, server errors, and unsupported reported versions do not
-change the saved configuration. A missing saved account or destination endpoint
-triggers one fresh detection during a refresh, allowing instance upgrades without
-automatically retrying uploads.
-
-API differences live in `lib/api.ts`. V6 uploads retain the `file[]` multipart
-field, `albumuuid` destination header, and `x-source-url` source-page header.
-V7 uploads use `chibi-folder-uuid` and append the multipart `source` field before
-the `file` field, following the backend team's source metadata contract.
-Destination lists are paginated with v6's `page` or v7's `offset` parameter.
-
-`lib/settings.ts` orders settings saves and cache updates. Existing `albums` and
-`recentAlbums` storage keys remain shared by both API adapters for compatibility
-with older installations. Changing the instance, authenticated account, or API
-generation clears recent destinations. Successful uploads add destinations to
-the recent list.
-
-Run `bun test` for API, settings, background-message, and multipart HTTP tests,
-and `bun run compile` for TypeScript checks. The tests use local fixtures and a
-local HTTP server; they do not upload to a real chibisafe instance.
+Companion extension for the chibisafe v6 and v7 service.
 
 Chibisafe is an open-source self-hosted file hosting service that allows for fast and easy file uploads. This extension aims to make it easy to upload to a chibisafe instance by adding a few new options to the context menu for quick uploading.
 
