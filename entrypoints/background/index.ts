@@ -1,147 +1,62 @@
+import { createApiClient, getErrorMessage } from '@/lib/api';
+import type { BackgroundMessage, ContentMessage, SettingsResult } from '@/lib/messages';
+import { ConnectionManager } from '@/lib/settings';
 import { getFileExtension } from '@/lib/utils';
 import { browser } from 'wxt/browser';
-import type { Album } from '../content/App';
+import { defineBackground } from 'wxt/utils/define-background';
 
 export default defineBackground(() => {
-	let urlToUpload: string | null = null;
+	const connections = new ConnectionManager(browser.storage.local);
+	const mediaUrls = new Map<number, string>();
+	let nextRuleId = 1;
 
-	const fetchAlbums = async () => {
-		const { siteUrl, apiKey, version } = await browser.storage.local.get(['siteUrl', 'apiKey', 'version']);
-		if (!siteUrl || !apiKey) return;
-
+	const notify = async (tabId: number, message: ContentMessage) => {
 		try {
-			const headers = {
-				'Content-Type': 'application/json',
-				'X-API-Key': apiKey
-			};
-
-			const url = version === '7' ? `${siteUrl}/api/v1/folders?limit=1000` : `${siteUrl}/api/albums?limit=1000`;
-			const response = await fetch(url, {
-				headers
-			});
-			const data = await response.json();
-			let albums: Album[] = [];
-
-			if (version === '7') {
-				albums = data.results.map((folder: Album) => ({
-					uuid: folder.uuid,
-					name: folder.name
-				}));
-			} else {
-				albums = data.albums.map((album: Album) => ({
-					uuid: album.uuid,
-					name: album.name
-				}));
-			}
-
-			const { currentAlbums } = await browser.storage.local.get('albums');
-			if (JSON.stringify(currentAlbums) === JSON.stringify(albums)) {
-				return false;
-			}
-
-			await browser.storage.local.set({ albums });
-			return true;
-		} catch (e) {
-			console.warn('Failed to fetch albums', e);
+			await browser.tabs.sendMessage(tabId, message);
+		} catch {
+			// The user may close or navigate the source tab while a request is running.
 		}
 	};
 
-	const hasValidApiKey = async () => {
-		const { apiKey } = await browser.storage.local.get('apiKey');
-		return !!apiKey;
-	};
-
-	const upload = async (albumUuid: string, pageUrl: string, tabId: number) => {
-		const { siteUrl, apiKey, version } = await browser.storage.local.get(['siteUrl', 'apiKey', 'version']);
-		if (!siteUrl || !apiKey) return;
-		if (!urlToUpload) return;
-
-		// console.log('uploading', urlToUpload, albumUuid, pageUrl);
-		// console.log('siteUrl', siteUrl);
-		// console.log('apiKey', apiKey);
-
-		const ruleId = Math.floor(Math.random() * 5000);
-		await browser.declarativeNetRequest.updateSessionRules({
-			addRules: [
-				{
-					id: ruleId,
-					priority: 1,
-					action: {
-						type: 'modifyHeaders',
-						requestHeaders: [
-							{
-								header: 'Referer',
-								operation: 'set',
-								value: pageUrl
-							}
-						]
-					},
-					condition: {
-						urlFilter: urlToUpload
-					}
-				}
-			]
-		});
-
+	const upload = async (albumUuid: string | undefined, pageUrl: string, tabId: number) => {
+		let ruleId: number | undefined;
 		try {
-			const dataToUpload = await fetch(urlToUpload).then(res => res.blob());
-			if (!dataToUpload) {
-				console.error('Failed to fetch data to upload');
-				return;
-			}
+			const connection = await connections.get();
+			const mediaUrl = mediaUrls.get(tabId);
+			if (!mediaUrl) throw new Error('Select media from the browser context menu again.');
 
-			const fileExtension = getFileExtension(urlToUpload, dataToUpload);
-
-			const formData = new FormData();
-			formData.append('file[]', dataToUpload, `upload${fileExtension}`);
-
-			const response = await fetch(`${siteUrl}/api/${version === '7' ? 'v1/' : ''}upload`, {
-				method: 'POST',
-				headers: {
-					...(apiKey && { 'X-API-Key': apiKey }),
-					...(albumUuid && { albumuuid: albumUuid }),
-					...(pageUrl && { 'x-source-url': pageUrl })
-				},
-				body: formData
-			});
-
-			const data = await response.json();
-
-			const isTabStillOpen = await browser.tabs.get(tabId);
-			if (isTabStillOpen) {
-				browser.tabs.sendMessage(tabId, { type: 'uploadSuccess', data: data });
-			}
-			// biome-ignore lint/suspicious/noExplicitAny: <explanation>
-		} catch (e: any) {
-			const isTabStillOpen = await browser.tabs.get(tabId);
-			if (isTabStillOpen) {
-				browser.tabs.sendMessage(tabId, { type: 'uploadError', data: e.toString() });
-			}
-
-			console.error('Failed to upload');
-			const data = (await e.json?.()) ?? e;
-			console.error(e, data);
-		} finally {
+			const activeRules = await browser.declarativeNetRequest.getSessionRules();
+			while (activeRules.some(rule => rule.id === nextRuleId)) nextRuleId++;
+			const candidateRuleId = nextRuleId++;
 			await browser.declarativeNetRequest.updateSessionRules({
-				removeRuleIds: [ruleId]
+				addRules: [
+					{
+						id: candidateRuleId,
+						priority: 1,
+						action: {
+							type: 'modifyHeaders',
+							requestHeaders: [{ header: 'Referer', operation: 'set', value: pageUrl }]
+						},
+						condition: { urlFilter: mediaUrl }
+					}
+				]
 			});
-		}
-	};
+			ruleId = candidateRuleId;
 
-	const addAlbumToRecentAlbums = async (album: Album) => {
-		const { recentAlbums } = await browser.storage.local.get('recentAlbums');
-
-		const strippedAlbum = {
-			uuid: album.uuid,
-			name: album.name
-		};
-
-		if (recentAlbums?.length) {
-			const filteredAlbums = recentAlbums.filter((a: Album) => a.uuid !== strippedAlbum.uuid);
-			const newRecentAlbums = [strippedAlbum, ...filteredAlbums].slice(0, 5);
-			browser.storage.local.set({ recentAlbums: newRecentAlbums });
-		} else {
-			browser.storage.local.set({ recentAlbums: [strippedAlbum] });
+			const response = await fetch(mediaUrl);
+			if (!response.ok) throw new Error(`Could not download the selected media (HTTP ${response.status}).`);
+			const file = await response.blob();
+			const extension = getFileExtension(mediaUrl, file);
+			await createApiClient(connection, connection.version).upload(file, `upload${extension}`, albumUuid, pageUrl);
+			// Recent destinations describe successful uploads, rather than attempted uploads.
+			await connections.rememberDestination(connection, albumUuid).catch(() => {});
+			await notify(tabId, { type: 'uploadSuccess' });
+		} catch (error) {
+			await notify(tabId, { type: 'uploadError', data: getErrorMessage(error) });
+		} finally {
+			if (ruleId !== undefined) {
+				await browser.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }).catch(() => {});
+			}
 		}
 	};
 
@@ -151,51 +66,49 @@ export default defineBackground(() => {
 		contexts: ['image', 'video', 'audio']
 	});
 
-	browser.runtime.onMessage.addListener(async (message, sender) => {
-		if (!sender.tab?.id) return;
-		switch (message.type) {
-			case 'close':
-				await browser.tabs.sendMessage(sender.tab.id, { type: 'unloadUI' });
-				break;
-			case 'saveSettings':
-				void fetchAlbums();
-				break;
-			case 'getAlbums':
-				// biome-ignore lint/correctness/noSwitchDeclarations: <explanation>
-				const updated = await fetchAlbums();
-				if (updated) {
-					browser.tabs.sendMessage(sender.tab.id, { type: 'fetchAlbumsFromCache' });
+	browser.runtime.onMessage.addListener(
+		async (message: BackgroundMessage, sender): Promise<SettingsResult | undefined> => {
+			// Options pages do not have a sender tab. Only content-tab actions require one.
+			if (message.type === 'saveSettings') {
+				try {
+					return { ok: true, connection: await connections.save(message.data) };
+				} catch (error) {
+					return { ok: false, error: getErrorMessage(error) };
 				}
-				break;
-			case 'openSettingsPage':
-				browser.runtime.openOptionsPage();
-				break;
-			case 'upload':
-				await upload(message.data.albumUuid, message.data.pageUrl, sender.tab.id);
-				break;
-			case 'addAlbumToRecentAlbums':
-				await addAlbumToRecentAlbums(message.data.album);
-				break;
-			default:
-				console.warn('Unknown message type', message);
-				break;
-		}
-	});
-
-	browser.contextMenus.onClicked.addListener(async (info, tab) => {
-		if (info.menuItemId === 'chibisafe' && info.srcUrl) {
-			if (!(await hasValidApiKey())) {
-				browser.runtime.openOptionsPage();
+			}
+			if (message.type === 'openSettingsPage') {
+				await browser.runtime.openOptionsPage();
 				return;
 			}
-
-			try {
-				if (!tab?.id) return;
-				await browser.tabs.sendMessage(tab.id, { type: 'loadUI' });
-				urlToUpload = info.srcUrl;
-			} catch (e) {
-				console.warn('Failed to open uploader', e);
+			const tabId = sender.tab?.id;
+			if (tabId === undefined) return;
+			switch (message.type) {
+				case 'close':
+					mediaUrls.delete(tabId);
+					await notify(tabId, { type: 'unloadUI' });
+					break;
+				case 'getAlbums':
+					try {
+						return { ok: true, connection: await connections.refresh() };
+					} catch (error) {
+						return { ok: false, error: getErrorMessage(error) };
+					}
+				case 'upload':
+					await upload(message.data.albumUuid, message.data.pageUrl, tabId);
+					break;
 			}
 		}
+	);
+
+	browser.tabs.onRemoved.addListener(tabId => mediaUrls.delete(tabId));
+	browser.contextMenus.onClicked.addListener(async (info, tab) => {
+		if (info.menuItemId !== 'chibisafe' || !info.srcUrl || tab?.id === undefined) return;
+		const { siteUrl, apiKey } = await browser.storage.local.get(['siteUrl', 'apiKey']);
+		if (!siteUrl || !apiKey) {
+			await browser.runtime.openOptionsPage();
+			return;
+		}
+		mediaUrls.set(tab.id, info.srcUrl);
+		await notify(tab.id, { type: 'loadUI' });
 	});
 });

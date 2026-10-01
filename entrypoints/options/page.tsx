@@ -1,110 +1,60 @@
 import Logo from '@/assets/logo.svg';
 import { Panel } from '@/components/Panel';
-import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/Checkbox';
 import { TextField } from '@/components/ui/TextField';
+import { Button } from '@/components/ui/button';
+import { getErrorMessage } from '@/lib/api';
+import type { SettingsResult } from '@/lib/messages';
+import { type Connection, readConnection } from '@/lib/settings';
+import { useEffect, useState } from 'react';
+import { browser } from 'wxt/browser';
 
 export default function Page() {
-	const [siteUrl, setSiteUrl] = useState<string | undefined>(undefined);
-	const [apiKey, setApiKey] = useState<string | undefined>(undefined);
-	const [showRecentAlbums, setShowRecentAlbums] = useState<boolean>(false);
+	const [siteUrl, setSiteUrl] = useState('');
+	const [apiKey, setApiKey] = useState('');
+	const [showRecentAlbums, setShowRecentAlbums] = useState(false);
 	const [isLoading, setIsLoading] = useState(false);
-	const [username, setUsername] = useState<string | undefined>(undefined);
-	const [albumCount, setAlbumCount] = useState<number | undefined>(undefined);
-
-	const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-		e.preventDefault();
-		setIsLoading(true);
-		const formData = new FormData(e.target as HTMLFormElement);
-		const siteUrl = formData.get('siteUrl') as string;
-		const apiKey = formData.get('apiKey') as string;
-
-		await browser.storage.local.set({
-			siteUrl: siteUrl,
-			apiKey: apiKey,
-			showRecentAlbums: showRecentAlbums
-		});
-
-		await browser.runtime.sendMessage({ type: 'saveSettings' });
-		await checkDetails();
-		setIsLoading(false);
-	};
+	const [connection, setConnection] = useState<Connection>();
+	const [error, setError] = useState<string>();
+	const [status, setStatus] = useState<string>();
+	const destinationName = connection?.version === '7' ? 'folders' : 'albums';
 
 	const checkDetails = async () => {
-		let version = '7';
-		if (await isVersion6()) version = '6';
-		await browser.storage.local.set({ version });
-
-		await fetchUser(version);
-		await fetchAlbumCount(version);
-	};
-
-	const fetchUser = async (version: string) => {
-		if (!siteUrl || !apiKey) return;
-		const url = version === '7' ? `${siteUrl}/api/v1/users/me` : `${siteUrl}/api/user/me`;
-
+		setIsLoading(true);
+		setError(undefined);
+		setStatus(undefined);
 		try {
-			const response = await fetch(url, {
-				headers: {
-					'Content-Type': 'application/json',
-					'X-API-Key': apiKey
-				}
+			const result: SettingsResult = await browser.runtime.sendMessage({
+				type: 'saveSettings',
+				data: { siteUrl, apiKey, showRecentAlbums }
 			});
-			const data = await response.json();
-			setUsername(version === '7' ? data.username : data.user.username);
-		} catch (e) {
-			console.warn('Failed to fetch user', e);
+			if (!result.ok) throw new Error(result.error);
+			setConnection(result.connection);
+			setSiteUrl(result.connection.siteUrl);
+			setApiKey(result.connection.apiKey);
+			setStatus('Settings saved and connection verified.');
+		} catch (error) {
+			setError(getErrorMessage(error));
+		} finally {
+			setIsLoading(false);
 		}
 	};
 
-	const fetchAlbumCount = async (version: string) => {
-		if (!siteUrl || !apiKey) return;
-		const url = version === '7' ? `${siteUrl}/api/v1/folders?limit=1000` : `${siteUrl}/api/albums?limit=1000`;
-
-		try {
-			const response = await fetch(url, {
-				headers: {
-					'Content-Type': 'application/json',
-					'X-API-Key': apiKey
-				}
-			});
-			const data = await response.json();
-			setAlbumCount(data.count);
-		} catch (e) {
-			console.warn('Failed to fetch albums', e);
-		}
-	};
-
-	const isVersion6 = async (): Promise<boolean> => {
-		if (!siteUrl || !apiKey) return false;
-
-		try {
-			const response = await fetch(`${siteUrl}/api/version`);
-			const data = await response.json();
-			if (data.error) return false;
-
-			return true;
-		} catch (e) {
-			console.warn('Failed to fetch version', e);
-		}
-
-		return false;
+	const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		await checkDetails();
 	};
 
 	useEffect(() => {
-		(async () => {
-			const { siteUrl, apiKey, showRecentAlbums } = await browser.storage.local.get([
-				'siteUrl',
-				'apiKey',
-				'showRecentAlbums'
-			]);
-
-			if (siteUrl && apiKey) {
-				setSiteUrl(siteUrl);
-				setApiKey(apiKey);
-				setShowRecentAlbums(showRecentAlbums);
-			}
-		})();
+		browser.storage.local
+			.get()
+			.then(data => {
+				setSiteUrl(typeof data.siteUrl === 'string' ? data.siteUrl : '');
+				setApiKey(typeof data.apiKey === 'string' ? data.apiKey : '');
+				setShowRecentAlbums(data.showRecentAlbums === true);
+				setConnection(readConnection(data));
+			})
+			.catch(error => setError(getErrorMessage(error)));
 	}, []);
 
 	return (
@@ -116,24 +66,34 @@ export default function Page() {
 				browser.
 				<br />
 				Make sure to set the instance URL and API key in the form below so that the extension can upload files and pull
-				album information from your chibisafe instance.
+				album or folder information from your chibisafe instance.
 			</p>
 
-			{siteUrl && apiKey && (
+			{connection && (
 				<Panel title="Account information" className="flex flex-col gap-4">
 					<div className="flex flex-col gap-4 text-sm">
 						<p>
-							Logged in as <span className="font-bold">{username}</span>
+							Logged in as <span className="font-bold">{connection.username}</span>
 						</p>
 						<p>
-							Number of folders: <span className="font-bold">{albumCount}</span>
+							Number of {destinationName}: <span className="font-bold">{connection.albumCount}</span>
 						</p>
-						<Button variant="filled" onClick={checkDetails}>
+						<p>
+							Instance: <span className="font-bold">{connection.appVersion ?? `v${connection.version} API`}</span>
+						</p>
+						<Button variant="filled" onPress={checkDetails} isDisabled={isLoading}>
 							Check details
 						</Button>
 					</div>
 				</Panel>
 			)}
+
+			{error && (
+				<p role="alert" className="text-red-400 text-sm max-w-xl">
+					{error}
+				</p>
+			)}
+			{status && <output className="text-default text-sm">{status}</output>}
 
 			<form className="*:not-first:mt-2 w-full max-w-xl flex flex-col gap-4" onSubmit={handleSubmit}>
 				<Panel title="Settings" className="flex flex-col gap-4">
@@ -143,7 +103,8 @@ export default function Page() {
 						placeholder="https://your-chibisafe-instance.com"
 						value={siteUrl}
 						isRequired
-						onInput={e => setSiteUrl((e.target as HTMLInputElement).value)}
+						isDisabled={isLoading}
+						onChange={setSiteUrl}
 					/>
 					<TextField
 						label="chibisafe API key"
@@ -151,12 +112,14 @@ export default function Page() {
 						placeholder="API key"
 						value={apiKey}
 						isRequired
-						onInput={e => setApiKey((e.target as HTMLInputElement).value)}
+						isDisabled={isLoading}
+						onChange={setApiKey}
 					/>
 
 					<Checkbox
-						description="This will show the recent albums you used in the uploader popup for quick access"
-						label="Show recent albums"
+						description={`Show recent ${destinationName} in the uploader popup for quick access`}
+						label={`Show recent ${destinationName}`}
+						isDisabled={isLoading}
 						isSelected={showRecentAlbums}
 						onChange={value => setShowRecentAlbums(value)}
 					/>
