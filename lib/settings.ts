@@ -119,7 +119,11 @@ export class ConnectionManager {
 		return this.enqueue(() => this.validateAndSave(input));
 	}
 
-	get(): Promise<Connection> {
+	async get(): Promise<Connection> {
+		// Uploads use the last validated settings without waiting for folder refreshes.
+		const connection = readConnection(await this.storage.get(connectionKeys));
+		if (connection) return connection;
+		// Initial validation and legacy migration still run with the other writes.
 		return this.enqueue(() => this.load());
 	}
 

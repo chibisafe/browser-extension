@@ -90,9 +90,9 @@ export default function App() {
 	const handleSelectAlbum = useCallback(
 		(album: Album, triggerUpload: boolean) => {
 			setSelectedAlbum(album);
-			if (triggerUpload && !isRefreshing) handleUpload(album);
+			if (triggerUpload) handleUpload(album);
 		},
-		[handleUpload, isRefreshing]
+		[handleUpload]
 	);
 
 	useEffect(() => {
@@ -206,7 +206,7 @@ export default function App() {
 										Refresh {destinationName}
 									</Button>
 									<div className="flex-1" />
-									<Button variant="filled" onPress={() => handleUpload()} isDisabled={isRefreshing}>
+									<Button variant="filled" onPress={() => handleUpload()}>
 										Upload
 									</Button>
 								</div>

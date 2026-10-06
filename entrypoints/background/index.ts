@@ -49,7 +49,8 @@ export default defineBackground(() => {
 			const extension = getFileExtension(mediaUrl, file);
 			await createApiClient(connection, connection.version).upload(file, `upload${extension}`, albumUuid, pageUrl);
 			// Recent destinations describe successful uploads, rather than attempted uploads.
-			await connections.rememberDestination(connection, albumUuid).catch(() => {});
+			// Cache writes may wait for a refresh; upload completion must not.
+			void connections.rememberDestination(connection, albumUuid).catch(() => {});
 			await notify(tabId, { type: 'uploadSuccess' });
 		} catch (error) {
 			await notify(tabId, { type: 'uploadError', data: getErrorMessage(error) });

@@ -125,3 +125,45 @@ test('a failed settings change preserves the configured instance', async () => {
 	expect(results[0]).toMatchObject({ ok: false });
 	expect(await fakeBrowser.storage.local.get()).toEqual(before);
 });
+
+test('uploads and reports success while a folder refresh is still pending', async () => {
+	await saveSettings();
+	await selectMedia(12);
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const fetchMediaAndUpload = spyOn(globalThis, 'fetch').getMockImplementation();
+	if (!fetchMediaAndUpload) throw new Error('The fetch fixture is missing');
+	spyOn(globalThis, 'fetch').mockImplementation(
+		Object.assign(
+			async (input: RequestInfo | URL, init: RequestInit = {}) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.pathname === '/api/v1/folders') {
+					started.resolve();
+					await release.promise;
+				}
+				return fetchMediaAndUpload(input, init);
+			},
+			{ preconnect: originalFetch.preconnect }
+		)
+	);
+	const refresh = fakeBrowser.runtime.onMessage.trigger({ type: 'getAlbums' }, { tab: { id: 12 } });
+	await started.promise;
+	const upload = fakeBrowser.runtime.onMessage.trigger(
+		{ type: 'upload', data: { albumUuid: 'folder-1', pageUrl: 'https://page.example' } },
+		{ tab: { id: 12 } }
+	);
+	const deadline = Promise.withResolvers<never>();
+	const timer = setTimeout(() => deadline.reject(new Error('Upload waited for the folder refresh')), 1000);
+	try {
+		await Promise.race([upload, deadline.promise]);
+		expect(uploadBodies).toHaveLength(1);
+		expect(messages.at(-1)?.message.type).toBe('uploadSuccess');
+		expect(removedRules).toHaveLength(1);
+		// Recents remain serialized with refresh writes and are recorded afterward.
+		expect((await fakeBrowser.storage.local.get('recentAlbums')).recentAlbums).toEqual([]);
+	} finally {
+		clearTimeout(timer);
+		release.resolve();
+		await Promise.all([refresh, upload]);
+	}
+});
